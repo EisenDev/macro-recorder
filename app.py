@@ -1,5 +1,6 @@
 import sys
 import os
+import platform
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QPushButton, QLabel, QHBoxLayout, QFileDialog, QSpacerItem, QSizePolicy, QMessageBox, QComboBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
@@ -16,7 +17,11 @@ class MiniRecorderWindow(QWidget):
         super().__init__()
         self.main_window = main_window
         
-        self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool | Qt.WindowType.BypassWindowManagerHint)
+        # BypassWindowManagerHint is Linux/X11 only — skip it on Windows to avoid broken window behavior
+        _flags = Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if platform.system() != "Windows":
+            _flags |= Qt.WindowType.BypassWindowManagerHint
+        self.setWindowFlags(_flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
         layout = QHBoxLayout()
@@ -37,7 +42,7 @@ class MiniRecorderWindow(QWidget):
         frame_layout.setSpacing(10)
         
         self.status_lbl = QLabel("Ready")
-        self.status_lbl.setStyleSheet("color: #1A1A1A; font-weight: bold; font-family: 'Inter', sans-serif; padding: 0 10px;")
+        self.status_lbl.setStyleSheet("color: #1A1A1A; font-weight: bold; font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif; padding: 0 10px;")
         
         self.start_btn = QPushButton("Start")
         self.start_btn.setObjectName("primaryButton")
@@ -70,7 +75,7 @@ class MiniRecorderWindow(QWidget):
         
         self.elapsed_seconds = 0
         self.status_lbl.setText("00:00")
-        self.status_lbl.setStyleSheet("color: #D32F2F; font-weight: bold; font-family: 'Inter', sans-serif; padding: 0 10px;")
+        self.status_lbl.setStyleSheet("color: #D32F2F; font-weight: bold; font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif; padding: 0 10px;")
         self.timer.start(1000)
         
         self.main_window.engine.start_recording()
@@ -83,7 +88,7 @@ class MiniRecorderWindow(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.status_lbl.setText("Ready")
-        self.status_lbl.setStyleSheet("color: #1A1A1A; font-weight: bold; font-family: 'Inter', sans-serif; padding: 0 10px;")
+        self.status_lbl.setStyleSheet("color: #1A1A1A; font-weight: bold; font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif; padding: 0 10px;")
         
     def showEvent(self, event):
         self.reset_state()
@@ -119,10 +124,10 @@ class MainWindow(QMainWindow):
             }
             QLabel {
                 color: #1A1A1A;
-                font-family: 'Inter', 'Helvetica Neue', sans-serif;
+                font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
             }
             QPushButton {
-                font-family: 'Inter', 'Helvetica Neue', sans-serif;
+                font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
                 font-weight: 600;
                 font-size: 14px;
                 padding: 12px 24px;
@@ -173,8 +178,10 @@ class MainWindow(QMainWindow):
         
         # Logo / Title
         title = QLabel("Automator.")
-        font = QFont("Inter", 24, QFont.Weight.Bold)
-        title.setFont(font)
+        _title_font = QFont("Inter", 24, QFont.Weight.Bold)
+        if _title_font.family() != "Inter":  # Inter not available, use best OS alternative
+            _title_font = QFont("Segoe UI" if platform.system() == "Windows" else "Helvetica Neue", 24, QFont.Weight.Bold)
+        title.setFont(_title_font)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
         
@@ -213,7 +220,7 @@ class MainWindow(QMainWindow):
         self.loop_combo.addItems(["1x", "2x", "5x", "10x", "Infinite"])
         self.loop_combo.setStyleSheet("""
             QComboBox {
-                font-family: 'Inter', sans-serif;
+                font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
                 font-size: 14px;
                 padding: 10px 15px;
                 border: 2px solid #E0DED8;
@@ -323,13 +330,13 @@ class MainWindow(QMainWindow):
                 }
                 QLabel {
                     color: #1A1A1A;
-                    font-family: 'Inter', sans-serif;
+                    font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
                     font-size: 14px;
                 }
                 QPushButton {
                     background-color: #1A1A1A;
                     color: #FFFFFF;
-                    font-family: 'Inter', sans-serif;
+                    font-family: 'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif;
                     font-weight: 600;
                     font-size: 13px;
                     padding: 8px 16px;
@@ -416,9 +423,15 @@ if __name__ == '__main__':
         msg.exec()
         sys.exit(1)
         
-    # Try to set font
-    font = QFont("Inter", 10)
-    app.setFont(font)
+    # Set best available font per platform
+    _preferred = ["Inter", "Segoe UI", "Helvetica Neue", "Arial"]
+    _app_font = None
+    for _fname in _preferred:
+        _f = QFont(_fname, 10)
+        if _f.family() == _fname or _fname in ["Segoe UI", "Arial"]:  # system fonts always match
+            _app_font = _f
+            break
+    app.setFont(_app_font if _app_font else QFont("Arial", 10))
     
     window = MainWindow()
     window.show()
