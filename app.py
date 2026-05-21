@@ -376,7 +376,7 @@ class MainWindow(QMainWindow):
         
         self.hide()
         
-        loop_count = 1
+        loop_count = 1  
         if hasattr(self, 'loop_combo'):
             loop_text = self.loop_combo.currentText()
             if loop_text == "Infinite":
@@ -389,7 +389,7 @@ class MainWindow(QMainWindow):
     def save_macro(self):
         file_path, _ = QFileDialog.getSaveFileName(self, "Save Macro", "", "JSON Files (*.json)")
         if file_path:
-            if not file_path.endswith('.json'):
+            if not   file_path.endswith('.json'):
                 file_path += '.json'
             self.engine.save_to_file(file_path)
             self.status_label.setText("Macro saved successfully.")
