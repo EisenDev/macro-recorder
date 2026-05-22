@@ -1,16 +1,22 @@
 import sys
 import os
 import platform
+import subprocess
+import re
+import time
+import ctypes
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QPushButton, QLabel, QHBoxLayout, QFileDialog, QSpacerItem, QSizePolicy, QMessageBox, QComboBox)
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QTimer
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont, QIcon, QGuiApplication
+from pynput import keyboard
 
 from macro_engine import MacroEngine
 
 class WorkerSignals(QObject):
     finished = pyqtSignal()
     status_update = pyqtSignal(str)
+    trigger_screenshot = pyqtSignal()
 
 class MiniRecorderWindow(QWidget):
     def __init__(self, main_window):
@@ -107,9 +113,11 @@ class MainWindow(QMainWindow):
         self.signals = WorkerSignals()
         self.signals.status_update.connect(self.update_status)
         self.signals.finished.connect(self.on_process_finished)
+        self.signals.trigger_screenshot.connect(self.capture_background_window)
         
         self.engine.set_on_stop_callback(self.on_engine_stopped)
         self.mini_window = MiniRecorderWindow(self)
+        self.screenshot_listener = None
         
         self.init_ui()
         
@@ -205,6 +213,13 @@ class MainWindow(QMainWindow):
         self.record_btn.setObjectName("primaryButton")
         self.record_btn.clicked.connect(self.open_mini_recorder)
         layout.addWidget(self.record_btn)
+        
+        # Background Screenshot Button
+        self.bg_ss_btn = QPushButton("Enable Background Capture (F10)")
+        self.bg_ss_btn.setObjectName("outlineButton")
+        self.bg_ss_btn.setCheckable(True)
+        self.bg_ss_btn.clicked.connect(self.toggle_background_screenshot)
+        layout.addWidget(self.bg_ss_btn)
         
         # Execute Layout (Button + Loop ComboBox)
         execute_layout = QHBoxLayout()
@@ -411,6 +426,315 @@ class MainWindow(QMainWindow):
             else:
                 self.status_label.setText("Failed to load macro.")
                 self.status_label.setStyleSheet("color: #D32F2F;")
+
+    def toggle_background_screenshot(self, checked):
+        if checked:
+            self.bg_ss_btn.setText("Background Capture ACTIVE (F10)")
+            self.bg_ss_btn.setStyleSheet("""
+                QPushButton#outlineButton {
+                    background-color: #388E3C;
+                    color: #FFFFFF;
+                    border: 2px solid #388E3C;
+                }
+                QPushButton#outlineButton:hover {
+                    background-color: #2E7D32;
+                    border-color: #2E7D32;
+                }
+            """)
+            self.start_screenshot_listener()
+            self.status_label.setText("Background capture enabled.")
+            self.status_label.setStyleSheet("color: #388E3C;")
+        else:
+            self.bg_ss_btn.setText("Enable Background Capture (F10)")
+            self.bg_ss_btn.setStyleSheet("")
+            self.stop_screenshot_listener()
+            self.status_label.setText("Background capture disabled.")
+            self.status_label.setStyleSheet("color: #A68A64;")
+
+    def start_screenshot_listener(self):
+        self.stop_screenshot_listener()
+        try:
+            self.screenshot_listener = keyboard.Listener(
+                on_press=self.on_global_key_press
+            )
+            self.screenshot_listener.start()
+        except Exception as e:
+            print("Failed to start screenshot listener:", e)
+
+    def stop_screenshot_listener(self):
+        if hasattr(self, 'screenshot_listener') and self.screenshot_listener:
+            try:
+                self.screenshot_listener.stop()
+            except Exception:
+                pass
+            self.screenshot_listener = None
+
+    def on_global_key_press(self, key):
+        try:
+            if key == keyboard.Key.f10:
+                self.signals.trigger_screenshot.emit()
+        except Exception:
+            pass
+
+    def capture_background_window(self):
+        if getattr(self, "_capturing_screenshot", False):
+            return
+        self._capturing_screenshot = True
+        
+        try:
+            if platform.system() == "Windows":
+                # --- WINDOWS IMPLEMENTATION ---
+                hwnd_active = ctypes.windll.user32.GetForegroundWindow()
+                if not hwnd_active:
+                    self.status_label.setText("No active window found.")
+                    self.status_label.setStyleSheet("color: #D32F2F;")
+                    self._capturing_screenshot = False
+                    return
+                
+                # Find the next normal visible application window in Z-order
+                hwnd_target = None
+                hwnd_curr = hwnd_active
+                target_name = "Unknown Window"
+                
+                # Exclude our own HWNDs
+                our_hwnds = [self.winId()]
+                if self.mini_window:
+                    try:
+                        our_hwnds.append(self.mini_window.winId())
+                    except Exception:
+                        pass
+                
+                while True:
+                    # GW_HWNDNEXT = 2
+                    hwnd_curr = ctypes.windll.user32.GetWindow(hwnd_curr, 2)
+                    if not hwnd_curr:
+                        break
+                    
+                    if not ctypes.windll.user32.IsWindowVisible(hwnd_curr):
+                        continue
+                        
+                    length = ctypes.windll.user32.GetWindowTextLengthW(hwnd_curr)
+                    if length == 0:
+                        continue
+                        
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    ctypes.windll.user32.GetWindowTextW(hwnd_curr, buf, length + 1)
+                    title = buf.value
+                    
+                    # Exclude our own windows
+                    if hwnd_curr in our_hwnds or "Macro Automator" in title or "Automator" in title:
+                        continue
+                        
+                    if title in ["Program Manager", "Start", "Taskbar", "Settings"]:
+                        continue
+                        
+                    hwnd_target = hwnd_curr
+                    target_name = title
+                    break
+                    
+                if not hwnd_target:
+                    self.status_label.setText("No background window found.")
+                    self.status_label.setStyleSheet("color: #D32F2F;")
+                    self._capturing_screenshot = False
+                    return
+                    
+                self.status_label.setText(f"Capturing: {target_name[:25]}...")
+                self.status_label.setStyleSheet("color: #388E3C;")
+                
+                os.makedirs("screenshots", exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                filename = f"screenshots/screenshot_behind_{timestamp}.png"
+                
+                # --- HYBRID CAPTURE: TRY SILENT OFF-SCREEN GRAB FIRST ---
+                screen = QGuiApplication.primaryScreen()
+                pixmap = screen.grabWindow(hwnd_target)
+                
+                if not pixmap.isNull() and pixmap.width() > 100 and pixmap.height() > 100:
+                    pixmap.save(filename)
+                    self.status_label.setText(f"Captured: {target_name[:20]}")
+                    self.status_label.setStyleSheet("color: #388E3C;")
+                    self._capturing_screenshot = False
+                    return
+                
+                # --- FALLBACK: SWITCH AND CAPTURE ---
+                ctypes.windll.user32.ShowWindow(hwnd_target, 9) # SW_RESTORE = 9
+                ctypes.windll.user32.SetForegroundWindow(hwnd_target)
+                
+                def check_and_grab_win(attempts=0):
+                    curr_fg = ctypes.windll.user32.GetForegroundWindow()
+                    if curr_fg == hwnd_target or attempts >= 15:
+                        def do_grab_win():
+                            try:
+                                screen = QGuiApplication.primaryScreen()
+                                pixmap = screen.grabWindow(0)
+                                
+                                ctypes.windll.user32.ShowWindow(hwnd_active, 9)
+                                ctypes.windll.user32.SetForegroundWindow(hwnd_active)
+                                
+                                if not pixmap.isNull():
+                                    pixmap.save(filename)
+                                    self.status_label.setText(f"Captured: {target_name[:20]}")
+                                    self.status_label.setStyleSheet("color: #388E3C;")
+                                else:
+                                    self.status_label.setText("Error: Screen grab failed.")
+                                    self.status_label.setStyleSheet("color: #D32F2F;")
+                            except Exception as ex:
+                                print("Error during Windows screen grab:", ex)
+                                self.status_label.setText("Capture failed.")
+                                self.status_label.setStyleSheet("color: #D32F2F;")
+                            finally:
+                                self._capturing_screenshot = False
+                        QTimer.singleShot(50, do_grab_win)
+                    else:
+                        QTimer.singleShot(20, lambda: check_and_grab_win(attempts + 1))
+                        
+                QTimer.singleShot(20, check_and_grab_win)
+
+            else:
+                # --- LINUX (X11) IMPLEMENTATION ---
+                active_out = subprocess.check_output("xprop -root _NET_ACTIVE_WINDOW", shell=True).decode()
+                m = re.search(r"window id # (0x[0-9a-fA-F]+)", active_out)
+                if not m:
+                    self.status_label.setText("No active window found.")
+                    self.status_label.setStyleSheet("color: #D32F2F;")
+                    self._capturing_screenshot = False
+                    return
+                active_id = int(m.group(1), 16)
+                
+                stack_out = subprocess.check_output("xprop -root _NET_CLIENT_LIST_STACKING", shell=True).decode()
+                m_stack = re.search(r"window id # (.*)", stack_out)
+                if not m_stack:
+                    self.status_label.setText("No window stack found.")
+                    self.status_label.setStyleSheet("color: #D32F2F;")
+                    self._capturing_screenshot = False
+                    return
+                stack_ids = [int(x.strip(), 16) for x in m_stack.group(1).split(",") if x.strip()]
+                
+                if active_id not in stack_ids:
+                    self.status_label.setText("Active window not in stack.")
+                    self.status_label.setStyleSheet("color: #D32F2F;")
+                    self._capturing_screenshot = False
+                    return
+                
+                # Excluded window IDs (our own app windows)
+                our_wids = [int(self.winId())]
+                if self.mini_window:
+                    try:
+                        our_wids.append(int(self.mini_window.winId()))
+                    except Exception:
+                        pass
+                
+                # Find target window under active_id, skipping our own windows and utility windows
+                target_wid = None
+                target_name = "Unknown Window"
+                
+                idx = stack_ids.index(active_id)
+                for i in range(idx - 1, -1, -1):
+                    wid = stack_ids[i]
+                    
+                    if wid in our_wids:
+                        continue
+                        
+                    name = "Unknown Window"
+                    try:
+                        name_out = subprocess.check_output(f"xprop -id {hex(wid)} WM_NAME", shell=True, stderr=subprocess.DEVNULL).decode()
+                        name_match = re.search(r"WM_NAME\(STRING\) = \"(.*)\"", name_out)
+                        if name_match:
+                            name = name_match.group(1)
+                        else:
+                            name_out = subprocess.check_output(f"xprop -id {hex(wid)} _NET_WM_NAME", shell=True, stderr=subprocess.DEVNULL).decode()
+                            name_match = re.search(r"_NET_WM_NAME\(UTF8_STRING\) = \"(.*)\"", name_out)
+                            if name_match:
+                                name = name_match.group(1)
+                    except Exception:
+                        pass
+                        
+                    if "Macro Automator" in name or "Automator" in name:
+                        continue
+                        
+                    if name in ["", "Unknown Window", "Desktop", "xfce4-panel", "gnome-shell", "mutter", "Desktop Sharing"]:
+                        continue
+                    if name.startswith("@!"):
+                        continue
+                        
+                    target_wid = wid
+                    target_name = name
+                    break
+                    
+                if not target_wid:
+                    self.status_label.setText("No background window available.")
+                    self.status_label.setStyleSheet("color: #D32F2F;")
+                    self._capturing_screenshot = False
+                    return
+                    
+                self.status_label.setText(f"Capturing: {target_name[:25]}...")
+                self.status_label.setStyleSheet("color: #388E3C;")
+                
+                os.makedirs("screenshots", exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                filename = f"screenshots/screenshot_behind_{timestamp}.png"
+                
+                # --- HYBRID CAPTURE: TRY SILENT OFF-SCREEN GRAB FIRST ---
+                screen = QGuiApplication.primaryScreen()
+                pixmap = screen.grabWindow(target_wid)
+                
+                if not pixmap.isNull() and pixmap.width() > 100 and pixmap.height() > 100:
+                    pixmap.save(filename)
+                    self.status_label.setText(f"Captured: {target_name[:20]}")
+                    self.status_label.setStyleSheet("color: #388E3C;")
+                    self._capturing_screenshot = False
+                    return
+                
+                # --- FALLBACK: SWITCH AND CAPTURE ---
+                subprocess.check_call(f"wmctrl -i -a {hex(target_wid)}", shell=True)
+                
+                # Poll active window status until target is active
+                def check_and_grab_lin(attempts=0):
+                    try:
+                        curr_active = subprocess.check_output("xprop -root _NET_ACTIVE_WINDOW", shell=True).decode()
+                        m_curr = re.search(r"window id # (0x[0-9a-fA-F]+)", curr_active)
+                        is_target = m_curr and int(m_curr.group(1), 16) == target_wid
+                        
+                        if is_target or attempts >= 15:
+                            def do_grab_lin():
+                                try:
+                                    screen = QGuiApplication.primaryScreen()
+                                    pixmap = screen.grabWindow(0)
+                                    
+                                    # Switch back
+                                    subprocess.check_call(f"wmctrl -i -a {hex(active_id)}", shell=True)
+                                    
+                                    if not pixmap.isNull():
+                                        pixmap.save(filename)
+                                        self.status_label.setText(f"Captured: {target_name[:20]}")
+                                        self.status_label.setStyleSheet("color: #388E3C;")
+                                    else:
+                                        self.status_label.setText("Error: Screen grab failed.")
+                                        self.status_label.setStyleSheet("color: #D32F2F;")
+                                    self._capturing_screenshot = False
+                                except Exception as ex:
+                                    print("Error during Linux screen grab:", ex)
+                                    self.status_label.setText("Capture failed.")
+                                    self.status_label.setStyleSheet("color: #D32F2F;")
+                                    self._capturing_screenshot = False
+                            
+                            QTimer.singleShot(50, do_grab_lin)
+                        else:
+                            QTimer.singleShot(20, lambda: check_and_grab_lin(attempts + 1))
+                    except Exception:
+                        self._capturing_screenshot = False
+                
+                QTimer.singleShot(20, check_and_grab_lin)
+                
+        except Exception as e:
+            print("Capture error:", e)
+            self.status_label.setText("Background capture error.")
+            self.status_label.setStyleSheet("color: #D32F2F;")
+            self._capturing_screenshot = False
+
+    def closeEvent(self, event):
+        self.stop_screenshot_listener()
+        super().closeEvent(event)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
